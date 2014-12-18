@@ -1,5 +1,7 @@
 # Thumbor Varnish HTTP Loader
 
+NOTE: This loader has some other StatsD things are going on in here. Not ready for general consumption yet.
+
 This Thumbor HTTP loader plugin is designed to rewrite incoming urls to instead make requests to
 an appropriately configured Varnish server. The purpose of this is to defer the responsibility
 of caching unprocessed images to a different software and server. As such, we recommend

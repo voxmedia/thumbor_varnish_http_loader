@@ -75,7 +75,7 @@ def load(context, url, callback):
     if user_agent is None:
         user_agent = context.config.HTTP_LOADER_DEFAULT_USER_AGENT
 
-    url = _normalize_url(url)
+    url = _normalize_url(context, url)
     req = tornado.httpclient.HTTPRequest(
         url=encode(url),
         connect_timeout=context.config.HTTP_LOADER_CONNECT_TIMEOUT,
