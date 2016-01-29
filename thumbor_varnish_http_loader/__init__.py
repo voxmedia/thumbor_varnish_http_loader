@@ -24,7 +24,7 @@ def _normalize_url(context, url):
     parsed_url = urlparse(url)
     for pattern in context.config.VARNISH_SOURCES_TO_PROXY:
       if re.match('^%s$' % pattern, parsed_url.hostname):
-        return re.sub(pattern, context.config.VARNISH_HOST, url)
+        return re.sub(pattern, context.config.VARNISH_HOST, url, 1)
 
     return url
 
