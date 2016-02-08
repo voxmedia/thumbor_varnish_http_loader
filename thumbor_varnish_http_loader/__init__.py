@@ -11,87 +11,64 @@ from functools import partial
 
 import tornado.httpclient
 
+from thumbor.loaders LoaderResult
 from thumbor.utils import logger
+from thumbor.loaders import http_loader
+from tornado.concurrent import return_future
 
 
-def _normalize_url(context, url):
+def _normalize_url(url):
     if not url.startswith('http'):
-      url = 'http://%s' % url
+        url = 'http://%s' % url
 
     if not context.config.VARNISH_SOURCES_TO_PROXY:
         return url
 
     parsed_url = urlparse(url)
     for pattern in context.config.VARNISH_SOURCES_TO_PROXY:
-      if re.match('^%s$' % pattern, parsed_url.hostname):
-        return re.sub(pattern, context.config.VARNISH_HOST, url, 1)
+        if re.match('^%s$' % pattern, parsed_url.hostname):
+            return re.sub(pattern, context.config.VARNISH_HOST, url, 1)
 
-    return url
+    return url if url.startswith('http') else 'http://%s' % url
 
-def validate(context, url):
-    url = _normalize_url(context, url)
-    res = urlparse(url)
 
-    if not res.hostname:
-        return False
-
-    if not context.config.ALLOWED_SOURCES:
-        return True
-
-    for pattern in context.config.ALLOWED_SOURCES:
-        if re.match('^%s$' % pattern, res.hostname):
-            return True
-
-    return False
+def validate(context, url, normalize_url_func=_normalize_url):
+    return http_loader.validate(context, url, normalize_url_func=_normalize_url)
 
 
 def return_contents(response, url, callback, context):
-    context.statsd_client.incr('original_image.status.' + str(response.code))
+    result = LoaderResult()
+
+    context.metrics.incr('original_image.status.' + str(response.code))
     if response.error:
-        logger.warn("ERROR retrieving image {0}: {1}".format(url, str(response.error)))
+        result.successful = False
         if response.code == 599:
-          raise tornado.web.HTTPError(503)
+            raise tornado.web.HTTPError(503)
+            result.error = LoaderResult.ERROR_TIMEOUT
         else:
-          callback(None)
+            result.error = LoaderResult.ERROR_NOT_FOUND
+            callback(None)
+
+        logger.warn("ERROR retrieving image {0}: {1}".format(url, str(response.error)))
+
     elif response.body is None or len(response.body) == 0:
+        result.successful = False
+        result.error = LoaderResult.ERROR_UPSTREAM
         logger.warn("ERROR retrieving image {0}: Empty response.".format(url))
         callback(None)
+
     else:
-        for x in response.time_info:
-            context.statsd_client.timing('original_image.time_info.' + x, response.time_info[x] * 1000)
-        context.statsd_client.timing('original_image.time_info.bytes_per_second', len(response.body) / response.time_info['total'])
-        callback(response.body)
+        if response.time_info:
+            for x in response.time_info:
+                context.metrics.timing('original_image.time_info.' + x, response.time_info[x] * 1000)
+            context.metrics.timing('original_image.time_info.bytes_per_second', len(response.body) / response.time_info['total'])
+        result.buffer = response.body
 
+    callback(result)
 
-def load(context, url, callback):
-    tornado.httpclient.AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
-    client = tornado.httpclient.AsyncHTTPClient()
-
-    user_agent = None
-    if context.config.HTTP_LOADER_FORWARD_USER_AGENT:
-        if 'User-Agent' in context.request_handler.request.headers:
-            user_agent = context.request_handler.request.headers['User-Agent']
-    if user_agent is None:
-        user_agent = context.config.HTTP_LOADER_DEFAULT_USER_AGENT
-
-    url = _normalize_url(context, url)
-    req = tornado.httpclient.HTTPRequest(
-        url=encode(url),
-        connect_timeout=context.config.HTTP_LOADER_CONNECT_TIMEOUT,
-        request_timeout=context.config.HTTP_LOADER_REQUEST_TIMEOUT,
-        follow_redirects=context.config.HTTP_LOADER_FOLLOW_REDIRECTS,
-        max_redirects=context.config.HTTP_LOADER_MAX_REDIRECTS,
-        user_agent=user_agent,
-        proxy_host=encode(context.config.HTTP_LOADER_PROXY_HOST),
-        proxy_port=context.config.HTTP_LOADER_PROXY_PORT,
-        proxy_username=encode(context.config.HTTP_LOADER_PROXY_USERNAME),
-        proxy_password=encode(context.config.HTTP_LOADER_PROXY_PASSWORD),
-        ca_certs=encode(context.config.HTTP_LOADER_CA_CERTS),
-        client_key=encode(context.config.HTTP_LOADER_CLIENT_KEY),
-        client_cert=encode(context.config.HTTP_LOADER_CLIENT_CERT)
-    )
-
-    client.fetch(req, callback=partial(return_contents, url=url, callback=callback, context=context))
+@return_future
+def load(context, url, callback, normalize_url_func=_normalize_url):
+    return http_loader.load_sync(context, url, callback, normalize_url_func=_normalize_url)
 
 def encode(string):
-    return None if string is None else string.encode('ascii')
+    return http_loader.encode(string)
