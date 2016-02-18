@@ -4,7 +4,7 @@ from setuptools import setup, find_packages
 
 setup(
 	name = 'thumbor_varnish_http_loader',
-	version = "2",
+	version = "3",
 	description = 'Thumbor HTTP Loader, using Varnish as a cache',
 	author = 'Clif Reeder',
 	author_email = 'clif@voxmedia.com',
