@@ -1,9 +1,12 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
+# thumbor imaging service
+# https://github.com/thumbor/thumbor/wiki
+
 # Licensed under the MIT license:
 # http://www.opensource.org/licenses/mit-license
-# Copyright (c) 2014 voxmedia.com
+# Copyright (c) 2011 globo.com timehome@corp.globo.com
 
 import re
 from urlparse import urlparse
@@ -11,25 +14,27 @@ from functools import partial
 
 import tornado.httpclient
 
+from thumbor.loaders import LoaderResult
 from thumbor.utils import logger
+from tornado.concurrent import return_future
 
 
 def _normalize_url(context, url):
     if not url.startswith('http'):
-      url = 'http://%s' % url
+        url = 'http://%s' % url
 
     if not context.config.VARNISH_SOURCES_TO_PROXY:
         return url
 
     parsed_url = urlparse(url)
     for pattern in context.config.VARNISH_SOURCES_TO_PROXY:
-      if re.match('^%s$' % pattern, parsed_url.hostname):
-        return re.sub(pattern, context.config.VARNISH_HOST, url, 1)
+        if re.match('^%s$' % pattern, parsed_url.hostname):
+            return re.sub(pattern, context.config.VARNISH_HOST, url, 1)
 
     return url
-
-def validate(context, url):
-    url = _normalize_url(context, url)
+    
+def validate(context, url, normalize_url_func=_normalize_url):
+    url = normalize_url_func(context, url)
     res = urlparse(url)
 
     if not res.hostname:
@@ -46,26 +51,43 @@ def validate(context, url):
 
 
 def return_contents(response, url, callback, context):
-    context.statsd_client.incr('original_image.status.' + str(response.code))
+    result = LoaderResult()
+
+    context.metrics.incr('original_image.status.' + str(response.code))
     if response.error:
-        logger.warn("ERROR retrieving image {0}: {1}".format(url, str(response.error)))
+        result.successful = False
         if response.code == 599:
-          raise tornado.web.HTTPError(503)
+            # Return a Gateway Timeout status downstream if upstream times out
+            result.error = LoaderResult.ERROR_TIMEOUT
         else:
-          callback(None)
+            result.error = LoaderResult.ERROR_NOT_FOUND
+
+        logger.warn("ERROR retrieving image {0}: {1}".format(url, str(response.error)))
+
     elif response.body is None or len(response.body) == 0:
+        result.successful = False
+        result.error = LoaderResult.ERROR_UPSTREAM
+
         logger.warn("ERROR retrieving image {0}: Empty response.".format(url))
-        callback(None)
     else:
-        for x in response.time_info:
-            context.statsd_client.timing('original_image.time_info.' + x, response.time_info[x] * 1000)
-        context.statsd_client.timing('original_image.time_info.bytes_per_second', len(response.body) / response.time_info['total'])
-        callback(response.body)
+        if response.time_info:
+            for x in response.time_info:
+                context.metrics.timing('original_image.time_info.' + x, response.time_info[x] * 1000)
+            context.metrics.timing('original_image.time_info.bytes_per_second', len(response.body) / response.time_info['total'])
+        result.buffer = response.body
+
+    callback(result)
+
+@return_future
+def load(context, url, callback, normalize_url_func=_normalize_url):
+    load_sync(context, url, callback, normalize_url_func)
 
 
-def load(context, url, callback):
-    tornado.httpclient.AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
-    client = tornado.httpclient.AsyncHTTPClient()
+def load_sync(context, url, callback, normalize_url_func):
+    using_proxy = context.config.HTTP_LOADER_PROXY_HOST and context.config.HTTP_LOADER_PROXY_PORT
+    if using_proxy or context.config.HTTP_LOADER_CURL_ASYNC_HTTP_CLIENT:
+        tornado.httpclient.AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
+    client = tornado.httpclient.AsyncHTTPClient(max_clients=context.config.HTTP_LOADER_MAX_CLIENTS)
 
     user_agent = None
     if context.config.HTTP_LOADER_FORWARD_USER_AGENT:
@@ -74,7 +96,7 @@ def load(context, url, callback):
     if user_agent is None:
         user_agent = context.config.HTTP_LOADER_DEFAULT_USER_AGENT
 
-    url = _normalize_url(context, url)
+    url = normalize_url_func(context, url)
     req = tornado.httpclient.HTTPRequest(
         url=encode(url),
         connect_timeout=context.config.HTTP_LOADER_CONNECT_TIMEOUT,
@@ -92,6 +114,7 @@ def load(context, url, callback):
     )
 
     client.fetch(req, callback=partial(return_contents, url=url, callback=callback, context=context))
+
 
 def encode(string):
     return None if string is None else string.encode('ascii')
