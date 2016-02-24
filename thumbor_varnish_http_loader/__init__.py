@@ -11,7 +11,7 @@ from functools import partial
 
 import tornado.httpclient
 
-from thumbor.loaders LoaderResult
+from . LoaderResult
 from thumbor.utils import logger
 
 from tornado.concurrent import return_future
